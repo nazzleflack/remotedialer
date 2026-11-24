@@ -28,7 +28,9 @@ func (s *Session) serveMessage(ctx context.Context, reader io.Reader) error {
 	case RemoveClient:
 		return s.removeRemoteClient(message.address)
 	case SyncConnections:
-		return s.syncConnections(message.body)
+		return s.syncConnections(message.body, false)
+	case SyncConnectionsTop:
+		return s.syncConnections(message.body, true)
 	case Data:
 		s.connectionData(message.connID, message.body)
 	case Pause:
@@ -90,12 +92,19 @@ func (s *Session) removeRemoteClient(address string) error {
 }
 
 // syncConnections closes any session connection that is not present in the IDs received from the client
-func (s *Session) syncConnections(r io.Reader) error {
+func (s *Session) syncConnections(r io.Reader, withTop bool) error {
 	payload, err := io.ReadAll(r)
 	if err != nil {
 		return fmt.Errorf("reading message body: %w", err)
 	}
-	clientActiveConnections, top, err := decodeConnectionIDs(payload)
+
+	var clientActiveConnections []int64
+	top := syncTopUnknown
+	if withTop {
+		clientActiveConnections, top, err = decodeConnectionIDsWithTop(payload)
+	} else {
+		clientActiveConnections, err = decodeConnectionIDs(payload)
+	}
 	if err != nil {
 		return fmt.Errorf("decoding sync connections payload: %w", err)
 	}
@@ -107,6 +116,10 @@ func (s *Session) syncConnections(r io.Reader) error {
 // closeConnection removes a connection for a given ID from the session, sending an error message to communicate the closing to the other end.
 // If an error is not provided, io.EOF will be used instead.
 func (s *Session) closeConnection(connID int64, err error) {
+	// Prevents a SyncConnections message from being sent before the one closing the connection
+	s.syncLock.RLock()
+	defer s.syncLock.RUnlock()
+
 	if conn := s.removeConnection(connID); conn != nil {
 		conn.tunnelClose(err)
 	}

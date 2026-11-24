@@ -93,7 +93,7 @@ outer:
 		}
 
 		metrics.IncSMTotalAddPeerAttempt(p.id)
-		ws, _, err := dialer.Dial(p.url, headers)
+		ws, resp, err := dialer.Dial(p.url, withProtocolVersion(headers, clientProtocolVersion))
 		if err != nil {
 			logrus.Errorf("Failed to connect to peer %s [local ID=%s]: %v", p.url, s.PeerID, err)
 			time.Sleep(5 * time.Second)
@@ -102,6 +102,7 @@ outer:
 		metrics.IncSMTotalPeerConnected(p.id)
 
 		session := NewClientSession(func(string, string) bool { return true }, ws)
+		session.protocolVersion = negotiateProtocolVersion(clientProtocolVersion, protocolVersionFromHeader(resp.Header))
 		session.dialer = func(ctx context.Context, network, address string) (net.Conn, error) {
 			parts := strings.SplitN(network, "::", 2)
 			if len(parts) != 2 {

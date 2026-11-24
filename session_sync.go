@@ -4,60 +4,92 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 )
 
 var errCloseSyncConnections = errors.New("sync from client")
 
-// syncIgnoreTop disables the 'top' field guard in compareAndCloseStaleConnections.
-// Used only in tests to simulate the pre-fix behavior and verify the bug is reproducible.
-var syncIgnoreTop bool
+// syncTopUnknown is the top used for SyncConnections messages, which do not include one
+const syncTopUnknown int64 = math.MaxInt64
 
-// encodeConnectionIDs serializes a slice of connection IDs and the topmost connection ID seen
-func encodeConnectionIDs(top int64, ids []int64) []byte {
+// encodeConnectionIDs serializes a slice of connection IDs
+func encodeConnectionIDs(ids []int64) []byte {
+	return appendConnectionIDs(make([]byte, 0, 8*len(ids)), ids)
+}
+
+// encodeConnectionIDsWithTop serializes the highest connection ID received by the client, followed by a slice of connection IDs
+func encodeConnectionIDsWithTop(top int64, ids []int64) []byte {
 	payload := make([]byte, 0, 8*(len(ids)+1))
-
-	// send top to denote the latest ID this packet was send with knowledge of
 	payload = binary.LittleEndian.AppendUint64(payload, uint64(top))
+	return appendConnectionIDs(payload, ids)
+}
 
+func appendConnectionIDs(payload []byte, ids []int64) []byte {
 	for _, id := range ids {
 		payload = binary.LittleEndian.AppendUint64(payload, uint64(id))
 	}
 	return payload
 }
 
-// decodeConnectionIDs deserializes a slice of connection IDs along with the highest seen
-func decodeConnectionIDs(payload []byte) ([]int64, int64, error) {
+// decodeConnectionIDs deserializes a slice of connection IDs
+func decodeConnectionIDs(payload []byte) ([]int64, error) {
 	if len(payload)%8 != 0 {
-		return nil, 0, fmt.Errorf("incorrect data format")
+		return nil, fmt.Errorf("incorrect data format")
 	}
-	top := int64(binary.LittleEndian.Uint64(payload[0 : 0+8]))
-
-	result := make([]int64, 0, (len(payload)/8)-1)
-	for x := 8; x < len(payload); x += 8 {
+	result := make([]int64, 0, len(payload)/8)
+	for x := 0; x < len(payload); x += 8 {
 		id := binary.LittleEndian.Uint64(payload[x : x+8])
 		result = append(result, int64(id))
 	}
-	return result, top, nil
+	return result, nil
 }
 
-func newSyncConnectionsMessage(top int64, connectionIDs []int64) *message {
+// decodeConnectionIDsWithTop deserializes a slice of connection IDs preceded by the highest connection ID received by the client
+func decodeConnectionIDsWithTop(payload []byte) ([]int64, int64, error) {
+	if len(payload) < 8 {
+		return nil, 0, fmt.Errorf("incorrect data format")
+	}
+	top := int64(binary.LittleEndian.Uint64(payload[:8]))
+	ids, err := decodeConnectionIDs(payload[8:])
+	return ids, top, err
+}
+
+func newSyncConnectionsMessage(connectionIDs []int64) *message {
 	return &message{
 		id:          nextid(),
 		messageType: SyncConnections,
-		bytes:       encodeConnectionIDs(top, connectionIDs),
+		bytes:       encodeConnectionIDs(connectionIDs),
 	}
 }
 
-// sendSyncConnections sends a binary message of type SyncConnections, whose payload is a list of the active connection IDs for this session
-func (s *Session) sendSyncConnections() error {
-	act, top := s.activeConnectionIDs()
+func newSyncConnectionsTopMessage(top int64, connectionIDs []int64) *message {
+	return &message{
+		id:          nextid(),
+		messageType: SyncConnectionsTop,
+		bytes:       encodeConnectionIDsWithTop(top, connectionIDs),
+	}
+}
 
-	_, err := s.writeMessage(time.Now().Add(SyncConnectionsTimeout), newSyncConnectionsMessage(top, act))
+// sendSyncConnections sends a binary message of type SyncConnections or SyncConnectionsTop, depending on the negotiated
+// protocol version, whose payload is a list of the active connection IDs for this session
+func (s *Session) sendSyncConnections() error {
+	s.syncLock.Lock()
+	defer s.syncLock.Unlock()
+
+	activeIDs, top := s.activeConnectionIDs()
+
+	msg := newSyncConnectionsMessage(activeIDs)
+	if s.protocolVersion >= protocolVersionSyncTop {
+		msg = newSyncConnectionsTopMessage(top, activeIDs)
+	}
+
+	_, err := s.writeMessage(time.Now().Add(SyncConnectionsTimeout), msg)
 	return err
 }
 
-// compareAndCloseStaleConnections compares the Session's activeConnectionIDs with the provided list from the client, then closing every connection not present in it
+// compareAndCloseStaleConnections compares the Session's activeConnectionIDs with the provided list from the client, then closing every connection not present in it.
+// Connections with an ID higher than top are kept, as the client had not received them yet when it built the list.
 func (s *Session) compareAndCloseStaleConnections(clientIDs []int64, top int64) {
 	serverIDs, _ := s.activeConnectionIDs()
 	toClose := diffSortedSetsGetRemoved(serverIDs, clientIDs)
@@ -69,8 +101,7 @@ func (s *Session) compareAndCloseStaleConnections(clientIDs []int64, top int64) 
 	defer s.Unlock()
 
 	for _, id := range toClose {
-		// dont close connection if packet contains id not ever seen by client
-		if !syncIgnoreTop && id > top {
+		if id > top {
 			break // not continue as toClose is sorted
 		}
 

@@ -31,6 +31,10 @@ type Session struct {
 	pingWait         sync.WaitGroup
 	dialer           Dialer
 	client           bool
+	maxSeenConnID    int64
+	protocolVersion  int
+	connectLock      sync.Mutex
+	syncLock         sync.RWMutex
 }
 
 // Use this defined type so we can share context between remotedialer and its clients
@@ -91,12 +95,8 @@ func (s *Session) addConnection(connID int64, conn *connection) {
 
 	s.conns[connID] = conn
 
-	// Track the highest connection ID seen by the client, used for sync packet 'top' field.
-	// Only on client sessions - server sessions manage nextConnID via atomic.AddInt64 in serverConnect.
-	if s.client {
-		if old := atomic.LoadInt64(&s.nextConnID); old < connID {
-			atomic.StoreInt64(&s.nextConnID, connID)
-		}
+	if s.client && connID > s.maxSeenConnID {
+		s.maxSeenConnID = connID
 	}
 
 	if PrintTunnelData {
@@ -133,9 +133,7 @@ func (s *Session) getConnection(connID int64) *connection {
 	return s.conns[connID]
 }
 
-// activeConnectionIDs returns an ordered list of IDs for the currently active connections
-// it also returns s.nextConnID (a hack to have both the list of conns and nextConnID read in the same lock)
-// TODO: seperate latter functionality
+// activeConnectionIDs returns an ordered list of IDs for the currently active connections, and the highest ID ever received
 func (s *Session) activeConnectionIDs() ([]int64, int64) {
 	s.RLock()
 	defer s.RUnlock()
@@ -145,7 +143,7 @@ func (s *Session) activeConnectionIDs() ([]int64, int64) {
 		res = append(res, id)
 	}
 	sort.Slice(res, func(i, j int) bool { return res[i] < res[j] })
-	return res, atomic.LoadInt64(&s.nextConnID)
+	return res, s.maxSeenConnID
 }
 
 // addSessionKey registers a new session key for a given client key
@@ -302,12 +300,15 @@ func (s *Session) serverConnectContext(ctx context.Context, proto, address strin
 }
 
 func (s *Session) serverConnect(deadline time.Time, proto, address string) (net.Conn, error) {
+	// Connect messages must be written in the same order as their IDs, as required by SyncConnectionsTop
+	s.connectLock.Lock()
 	connID := atomic.AddInt64(&s.nextConnID, 1)
 	conn := newConnection(connID, s, proto, address)
 
 	s.addConnection(connID, conn)
 
 	_, err := s.writeMessage(deadline, newConnect(connID, proto, address))
+	s.connectLock.Unlock()
 	if err != nil {
 		s.closeConnection(connID, err)
 		return nil, err

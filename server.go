@@ -62,7 +62,10 @@ func (s *Server) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		Error:            s.errorWriter,
 	}
 
-	wsConn, err := upgrader.Upgrade(rw, req, nil)
+	clientVersion := protocolVersionFromHeader(req.Header)
+	responseHeader := withProtocolVersion(nil, negotiateProtocolVersion(serverProtocolVersion, clientVersion))
+
+	wsConn, err := upgrader.Upgrade(rw, req, responseHeader)
 	if err != nil {
 		s.errorWriter(rw, req, 400, errors.Wrapf(err, "Error during upgrade for host [%v]", clientKey))
 		return

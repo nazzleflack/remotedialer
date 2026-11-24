@@ -42,7 +42,7 @@ func ConnectToProxyWithDialer(rootCtx context.Context, proxyURL string, headers 
 	if dialer == nil {
 		dialer = &websocket.Dialer{Proxy: http.ProxyFromEnvironment, HandshakeTimeout: HandshakeTimeOut}
 	}
-	ws, resp, err := dialer.DialContext(rootCtx, proxyURL, headers)
+	ws, resp, err := dialer.DialContext(rootCtx, proxyURL, withProtocolVersion(headers, clientProtocolVersion))
 	if err != nil {
 		if resp == nil {
 			if !errors.Is(err, context.Canceled) {
@@ -67,6 +67,7 @@ func ConnectToProxyWithDialer(rootCtx context.Context, proxyURL string, headers 
 	ctx = context.WithValue(ctx, ContextKeyCaller, fmt.Sprintf("ConnectToProxy: url: %s", proxyURL))
 
 	session := NewClientSessionWithDialer(auth, ws, localDialer)
+	session.protocolVersion = negotiateProtocolVersion(clientProtocolVersion, protocolVersionFromHeader(resp.Header))
 	defer session.Close()
 
 	if onConnect != nil {

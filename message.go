@@ -35,6 +35,9 @@ const (
 	// SyncConnections is a message type used to communicate active connection IDs.
 	// The receiver can consider any ID not present in this message as stale and free any associated resource.
 	SyncConnections
+	// SyncConnectionsTop is a SyncConnections message which also includes the highest connection ID received by the sender.
+	// The receiver must not consider stale any ID above it.
+	SyncConnectionsTop
 )
 
 var (
@@ -249,6 +252,8 @@ func (m *message) String() string {
 		return fmt.Sprintf("%d RESUME       [%d]", m.id, m.connID)
 	case SyncConnections:
 		return fmt.Sprintf("%d SYNCCONNS    [%d]", m.id, m.connID)
+	case SyncConnectionsTop:
+		return fmt.Sprintf("%d SYNCCONNSTOP [%d]", m.id, m.connID)
 	}
 	return fmt.Sprintf("%d UNKNOWN[%d]: %d", m.id, m.connID, m.messageType)
 }
